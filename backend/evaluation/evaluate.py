@@ -1,7 +1,6 @@
 """
-RAG Evaluation Script
+RAG Evaluation — Before vs After Reranking
 Metrics: Precision@K, MRR, NDCG
-5 test queries with expected relevant papers
 """
 
 import asyncio
@@ -11,8 +10,8 @@ import math
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from retrieval.search import semantic_search
+from retrieval.reranker import rerank
 
-# 5 test queries with known relevant paper titles
 TEST_QUERIES = [
     {
         "query": "How does retrieval augmented generation improve LLM accuracy?",
@@ -51,79 +50,79 @@ TEST_QUERIES = [
 ]
 
 
-def precision_at_k(retrieved_titles: list[str], relevant_titles: list[str], k: int) -> float:
-    """Fraction of top-k retrieved docs that are relevant."""
+def precision_at_k(retrieved_titles, relevant_titles, k):
     top_k = retrieved_titles[:k]
-    hits = sum(1 for t in top_k if any(rel.lower() in t.lower() or t.lower() in rel.lower() 
-                                        for rel in relevant_titles))
+    hits = sum(1 for t in top_k if any(
+        rel.lower() in t.lower() or t.lower() in rel.lower()
+        for rel in relevant_titles))
     return hits / k
 
 
-def mrr(retrieved_titles: list[str], relevant_titles: list[str]) -> float:
-    """Mean Reciprocal Rank — rank of first relevant result."""
+def mrr(retrieved_titles, relevant_titles):
     for i, title in enumerate(retrieved_titles):
-        if any(rel.lower() in title.lower() or title.lower() in rel.lower() 
+        if any(rel.lower() in title.lower() or title.lower() in rel.lower()
                for rel in relevant_titles):
             return 1.0 / (i + 1)
     return 0.0
 
 
-def ndcg_at_k(retrieved_titles: list[str], relevant_titles: list[str], k: int) -> float:
-    """Normalized Discounted Cumulative Gain at k."""
-    def relevance(title):
-        return 1 if any(rel.lower() in title.lower() or title.lower() in rel.lower() 
-                       for rel in relevant_titles) else 0
-
-    dcg = sum(relevance(retrieved_titles[i]) / math.log2(i + 2) 
+def ndcg_at_k(retrieved_titles, relevant_titles, k):
+    def rel(title):
+        return 1 if any(r.lower() in title.lower() or title.lower() in r.lower()
+                        for r in relevant_titles) else 0
+    dcg = sum(rel(retrieved_titles[i]) / math.log2(i + 2)
               for i in range(min(k, len(retrieved_titles))))
-
-    ideal = sorted([relevance(t) for t in retrieved_titles], reverse=True)
-    idcg = sum(ideal[i] / math.log2(i + 2) 
+    ideal = sorted([rel(t) for t in retrieved_titles], reverse=True)
+    idcg = sum(ideal[i] / math.log2(i + 2)
                for i in range(min(k, len(ideal))))
-
     return dcg / idcg if idcg > 0 else 0.0
 
 
-async def evaluate(top_k: int = 5):
-    print(f"{'='*60}")
-    print(f"RAG Evaluation — top_k={top_k}")
-    print(f"{'='*60}\n")
+async def run_eval(use_reranker: bool, top_k: int = 5):
+    all_p, all_mrr, all_ndcg = [], [], []
 
-    all_p_at_k = []
-    all_mrr = []
-    all_ndcg = []
-
-    for i, test in enumerate(TEST_QUERIES):
+    for test in TEST_QUERIES:
         query = test["query"]
         relevant = test["relevant_titles"]
 
-        results = await semantic_search(query, top_k=top_k)
-        retrieved_titles = [r["title"] for r in results]
+        if use_reranker:
+            candidates = await semantic_search(query, top_k=20)
+            results = rerank(query, candidates, top_k=top_k)
+        else:
+            results = await semantic_search(query, top_k=top_k)
 
-        p = precision_at_k(retrieved_titles, relevant, top_k)
-        m = mrr(retrieved_titles, relevant)
-        n = ndcg_at_k(retrieved_titles, relevant, top_k)
+        titles = [r["title"] for r in results]
+        all_p.append(precision_at_k(titles, relevant, top_k))
+        all_mrr.append(mrr(titles, relevant))
+        all_ndcg.append(ndcg_at_k(titles, relevant, top_k))
 
-        all_p_at_k.append(p)
-        all_mrr.append(m)
-        all_ndcg.append(n)
+    return {
+        "precision": round(sum(all_p) / len(all_p), 3),
+        "mrr": round(sum(all_mrr) / len(all_mrr), 3),
+        "ndcg": round(sum(all_ndcg) / len(all_ndcg), 3)
+    }
 
-        print(f"Query {i+1}: {query[:55]}...")
-        print(f"  Precision@{top_k}: {p:.3f}  |  MRR: {m:.3f}  |  NDCG@{top_k}: {n:.3f}")
-        print(f"  Retrieved:")
-        for j, r in enumerate(results):
-            marker = "✅" if any(rel.lower() in r['title'].lower() or r['title'].lower() in rel.lower() 
-                                  for rel in relevant) else "  "
-            print(f"    {marker} [{r['similarity']:.3f}] {r['title'][:55]}")
-        print()
 
-    print(f"{'='*60}")
-    print(f"AGGREGATE RESULTS (n={len(TEST_QUERIES)} queries, k={top_k})")
-    print(f"{'='*60}")
-    print(f"  Mean Precision@{top_k}: {sum(all_p_at_k)/len(all_p_at_k):.3f}")
-    print(f"  Mean MRR:          {sum(all_mrr)/len(all_mrr):.3f}")
-    print(f"  Mean NDCG@{top_k}:     {sum(all_ndcg)/len(all_ndcg):.3f}")
+async def evaluate():
+    print("Running evaluation (this may take a minute)...\n")
+
+    print("Stage 1: Bi-encoder only (pgvector cosine)")
+    before = await run_eval(use_reranker=False)
+    print(f"  Precision@5: {before['precision']}  |  MRR: {before['mrr']}  |  NDCG@5: {before['ndcg']}\n")
+
+    print("Stage 2: Two-stage (pgvector → cross-encoder reranker)")
+    after = await run_eval(use_reranker=True)
+    print(f"  Precision@5: {after['precision']}  |  MRR: {after['mrr']}  |  NDCG@5: {after['ndcg']}\n")
+
+    print("="*55)
+    print("IMPROVEMENT")
+    print("="*55)
+    print(f"  Precision@5: {before['precision']} → {after['precision']}  ({'+' if after['precision'] >= before['precision'] else ''}{round((after['precision']-before['precision'])*100, 1)}%)")
+    print(f"  MRR:         {before['mrr']} → {after['mrr']}  ({'+' if after['mrr'] >= before['mrr'] else ''}{round((after['mrr']-before['mrr'])*100, 1)}%)")
+    print(f"  NDCG@5:      {before['ndcg']} → {after['ndcg']}  ({'+' if after['ndcg'] >= before['ndcg'] else ''}{round((after['ndcg']-before['ndcg'])*100, 1)}%)")
+
+    return before, after
 
 
 if __name__ == "__main__":
-    asyncio.run(evaluate(top_k=5))
+    asyncio.run(evaluate())

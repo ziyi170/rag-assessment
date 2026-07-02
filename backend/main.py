@@ -83,3 +83,41 @@ async def query(request: QueryRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+
+from retrieval.reranker import rerank
+
+
+@app.post("/query/reranked")
+async def query_reranked(request: QueryRequest):
+    """
+    Two-stage RAG pipeline:
+    Stage 1: pgvector retrieves top-20 candidates
+    Stage 2: cross-encoder reranks to top-k
+    Stage 3: Claude generates answer
+    """
+    try:
+        # Stage 1: retrieve more candidates
+        candidates = await semantic_search(request.query, top_k=20)
+
+        # Stage 2: rerank
+        top_docs = rerank(request.query, candidates, top_k=request.top_k)
+
+        # Stage 3: generate answer
+        answer = answer_with_claude(request.query, top_docs)
+
+        return QueryResponse(
+            query=request.query,
+            answer=answer,
+            sources=[{
+                "title": d["title"],
+                "url": d["url"],
+                "similarity": d.get("similarity", 0),
+                "reranker_score": d.get("reranker_score", 0),
+                "published": d["published"]
+            } for d in top_docs],
+            top_k=request.top_k
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
