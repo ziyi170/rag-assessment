@@ -3,12 +3,6 @@
 A production-ready RAG system built with Python, FastAPI, PostgreSQL + pgvector, and Claude.
 
 ## Architecture
-cat > /workspaces/rag-assessment/README.md << 'EOF'
-# RAG Assessment — LEC AI
-
-A production-ready RAG system built with Python, FastAPI, PostgreSQL + pgvector, and Claude.
-
-## Architecture
 User Query
 
 ↓
